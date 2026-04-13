@@ -1,94 +1,59 @@
-import os
-import sys
-import typing
+from llm import generate, is_configured
 
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+SYSTEM_PROMPT = """
+Você é um revisor de legendas ortográfico e gramatical EXPERT.
+Sua missão é corrigir erros de português em uma lista de palavras, mantendo ESTRITAMENTE a estrutura.
 
-def corrigir_palavras_com_gemini(words_list: list, api_key: str):
-    """
-    Recebe uma lista de dicionários de palavras [{'word': 'oi', 'start': 0, 'end': 1}, ...]
-    Usa o Gemini para corrigir a grafia das palavras mantendo a sincronia.
-    """
-    if not genai:
-        print("❌ Biblioteca 'google-generativeai' não instalada.")
+REGRAS DE OURO:
+1. Você receberá palavras separadas por ' | '.
+2. Você deve retornar as palavras corrigidas separadas por ' | '.
+3. A quantidade de palavras na saída DEVE SER IDÊNTICA à entrada.
+4. NÃO mude a ordem das palavras.
+5. Corrija apenas: erros de digitação, acentuação (ex: 'eh' -> 'é', 'voce' -> 'você') e gramática óbvia.
+6. Não mude o estilo (gírias podem ser mantidas se estiverem grafadas corretamente, ex: 'tá' é aceitável, mas 'ta' deve virar 'tá').
+7. Se não houver erro, repita a palavra original.
+"""
+
+
+def corrigir_palavras(words_list: list, api_key: str = None, batch_size: int = 100):
+    """Corrige ortografia preservando timestamps e ordem."""
+    if api_key:
+        # compat: se chamado com chave explícita, setar no env conforme provider
+        import os
+        if os.environ.get("LLM_PROVIDER", "google") == "openrouter":
+            os.environ["OPENROUTER_API_KEY"] = api_key
+        else:
+            os.environ["GEMINI_API_KEY"] = api_key
+
+    if not is_configured():
+        print("⚠️  LLM não configurado. Pulando correção.")
         return words_list
 
-    if not api_key:
-        print("⚠️  API Key do Google não fornecida. Pulando correção.")
-        return words_list
+    print(f"[IA] Corrigindo {len(words_list)} palavras...")
 
-    print(f"[IA] Conectando ao Google Gemini para corrigir {len(words_list)} palavras...")
-    
-    genai.configure(api_key=api_key)
-    
-    # Configuração do modelo
-    generation_config = {
-        "temperature": 0.1, # Baixa criatividade, foco em precisão
-        "top_p": 1,
-        "top_k": 1,
-        "max_output_tokens": 8192,
-    }
+    all_texts = [w["word"].strip() for w in words_list]
+    corrected = []
 
-    model = genai.GenerativeModel(model_name="gemini-2.5-flash", generation_config=generation_config)
-
-    # Para evitar estourar o contexto ou limites, vamos processar em lotes grandes (ex: 50 palavras)
-    # O ideal é mandar frases completas, mas como temos uma lista de palavras soltas do whisper,
-    # vamos agrupar e pedir para ele devolver a lista corrigida.
-    
-    BATCH_SIZE = 100
-    corrected_words_list = []
-    
-    # Extrai apenas o texto para enviar
-    all_texts = [w['word'].strip() for w in words_list]
-    
-    for i in range(0, len(all_texts), BATCH_SIZE):
-        batch = all_texts[i:i+BATCH_SIZE]
+    for i in range(0, len(all_texts), batch_size):
+        batch = all_texts[i : i + batch_size]
         batch_str = " | ".join(batch)
-        
-        prompt = f"""
-        Você é um revisor de legendas em Português.
-        Abaixo está uma lista de palavras extraídas de um áudio (separadas por ' | ').
-        Sua tarefa é corrigir APENAS a ortografia e acentuação (ex: 'voce' -> 'você', 'eh' -> 'é').
-        
-        REGRAS CRÍTICAS:
-        1. Mantenha EXATAMENTE o mesmo número de palavras.
-        2. NÃO mude a ordem.
-        3. NÃO reescreva a frase para mudar o sentido. Apenas corrija erros óbvios.
-        4. Retorne as palavras corrigidas separadas por ' | '.
-        5. Se a palavra já estiver correta, mantenha ela.
-        
-        Lista:
-        {batch_str}
-        """
-        
         try:
-            response = model.generate_content(prompt)
-            texto_retornado = response.text.strip()
-            
-            # Tenta separar
-            palavras_corrigidas = [p.strip() for p in texto_retornado.split('|')]
-            
-            # Validação de segurança: Se o número de palavras mudou, ignoramos a correção desse lote
-            if len(palavras_corrigidas) != len(batch):
-                print(f"⚠️  Aviso: O Gemini retornou {len(palavras_corrigidas)} palavras, mas enviei {len(batch)}. Ignorando correção deste lote para não quebrar sincronia.")
-                corrected_words_list.extend(batch) # Usa original
+            text = generate(f"Corrija esta lista:\n{batch_str}", system=SYSTEM_PROMPT).strip()
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) != len(batch):
+                print(f"⚠️  Lote {i // batch_size} com tamanho divergente. Mantendo original.")
+                corrected.extend(batch)
             else:
-                corrected_words_list.extend(palavras_corrigidas)
-                
+                corrected.extend(parts)
         except Exception as e:
-            print(f"❌ Erro ao chamar API do Gemini: {e}")
-            corrected_words_list.extend(batch) # Usa original em caso de erro
+            print(f"❌ Erro no lote {i // batch_size}: {e}")
+            corrected.extend(batch)
 
-    # Reconstrói a lista de objetos com os timestamps originais e texto novo
-    new_words_list = []
-    for original_obj, new_text in zip(words_list, corrected_words_list):
-        new_obj = original_obj.copy()
-        new_obj['word'] = new_text
-        new_words_list.append(new_obj)
-        
+    result = []
+    for original, new_text in zip(words_list, corrected):
+        obj = original.copy()
+        obj["word"] = new_text
+        result.append(obj)
+
     print("[IA] Correção concluída.")
-    return new_words_list
-
+    return result

@@ -50,3 +50,7 @@ upload/
 !upload/.gitkeep
 !upload/processados/.gitkeep
 
+config.json
+
+# Arquivos temporários dos jobs
+tmp/

@@ -23,7 +23,7 @@ def listar_videos():
 
 def perguntar_gemini_key():
     # Verifica se existe no ambiente (carregado do .env ou sistema)
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY")
     
     if key:
         print(f"\nℹ️  API Key encontrada no ambiente.")

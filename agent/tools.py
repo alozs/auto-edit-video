@@ -41,7 +41,7 @@ except ImportError:
         print(f"CRITICAL ERROR importing video scripts: {e}")
         traceback.print_exc()
 
-import google.generativeai as genai
+from llm import generate as llm_generate, is_configured as llm_is_configured
 
 def list_videos():
     import glob
@@ -101,8 +101,8 @@ def add_subtitles_tool(video_path: str, model: str = "small") -> str:
     output_path = f"{base}_legendado{ext}"
     
     try:
-        gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+
         final_path = processar_legenda_completo(
             full_path,
             output_path,
@@ -145,17 +145,20 @@ def analyze_takes_tool(video_path: str) -> str:
     print(f"[Analyze] Enviando para análise (Gemini)...")
     
     prompt = f"""
-    Analise a seguinte transcrição de um vídeo bruto. 
-    O orador pode ter cometido erros e repetido frases (takes ruins).
-    Identifique os trechos que são claramente erros, gaguejadas ou tentativas falhas que foram corrigidas logo em seguida.
-    
-    TAMBÉM verifique grandes pausas ou silêncios que não foram transcritos mas podem ser inferidos pelos timestamps.
-    
+    Analise a seguinte transcrição de um vídeo bruto.
+    Identifique e marque para REMOÇÃO os seguintes tipos de trecho:
+
+    1. Takes ruins / tentativas falhas: o orador erra uma frase e a repete/corrige logo em seguida (remova a tentativa errada, mantenha a boa).
+    2. Gaguejadas e auto-correções ("eu-eu-eu acho", "a gente vai... a gente vai fazer").
+    3. Vícios de linguagem e muletas quando isoladas ou em excesso: "é...", "éh", "ãh", "hum", "tipo", "tipo assim", "tipo que", "né", "então...", "aí...", "sabe?", "meio que", "tipo, né". Use bom senso: NÃO remova quando fazem parte natural da frase (ex: "tipo de coisa", "aí eu fui").
+    4. Grandes pausas ou silêncios inferidos pelos timestamps (gap entre end de um segmento e start do próximo).
+
     Transcrição:
     {transcript_text}
-    
+
     Retorne APENAS um JSON com a lista de intervalos para REMOVER.
-    Seja conservador: Só remova se tiver CERTEZA que é um erro ou repetição desnecessária.
+    Seja cirúrgico nos vícios: corte só o intervalo da muleta, preservando o contexto ao redor.
+    Em caso de dúvida entre cortar ou manter, MANTENHA.
     
     Formato:
     {{
@@ -167,22 +170,15 @@ def analyze_takes_tool(video_path: str) -> str:
     Se não houver nada para remover, retorne lista vazia.
     """
     
-    gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not gemini_key:
-        return "Erro: API Key do Gemini não configurada."
-        
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    
+    if not llm_is_configured():
+        return "Erro: LLM não configurado. Vá em Configurações e salve a API Key."
+
     try:
-        response = model.generate_content(prompt)
-        text_resp = response.text.strip()
-        # Limpa markdown se houver
+        text_resp = llm_generate(prompt).strip()
         if text_resp.startswith("```json"):
             text_resp = text_resp[7:-3]
         elif text_resp.startswith("```"):
             text_resp = text_resp[3:-3]
-            
         return text_resp
     except Exception as e:
         return f"Erro na análise da IA: {e}"
@@ -275,7 +271,8 @@ def cut_segments_tool(video_path: str, remove_intervals_json: str) -> str:
     ]
     
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         return f"Vídeo limpo salvo em: {os.path.basename(output_path)}"
     except subprocess.CalledProcessError as e:
-        return f"Erro ao renderizar cortes: {e}"
+        stderr_tail = (e.stderr or "").strip().splitlines()[-10:]
+        return "Erro ao renderizar cortes:\n" + "\n".join(stderr_tail)

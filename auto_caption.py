@@ -5,30 +5,16 @@ import subprocess
 import sys
 import re
 
-import whisper
 import pysubs2
 
-# Import opcional da correção ADK
-try:
-    from adk_correction import corrigir_palavras_com_adk
-except ImportError as e:
-    print(f"⚠️  Aviso: Não foi possível importar o módulo de correção ADK: {e}")
-    corrigir_palavras_com_adk = None
+from utils.whisper_cache import transcribe as _transcribe
+from correction import corrigir_palavras
 
 
 def transcrever(video_path: str, model_name: str = "small", language: str = "pt"):
-    print(f"[1/3] Carregando modelo Whisper ({model_name})...")
-    model = whisper.load_model(model_name)
-
-    print(f"[2/3] Transcrevendo áudio de {video_path}...")
-    # Precisamos ativar word_timestamps para ter o tempo de cada palavra
-    result = model.transcribe(
-        video_path,
-        language=language,
-        verbose=True,
-        word_timestamps=True
-    )
-    return result["segments"]
+    print(f"[1/3] Transcrevendo {video_path} com Whisper ({model_name})...")
+    return _transcribe(video_path, model_name=model_name, language=language,
+                       word_timestamps=True, verbose=True)
 
 
 def gerar_ass_capcut(segments, ass_path: str):
@@ -156,10 +142,10 @@ def queimar_legenda(video_path: str, ass_path: str, output_path: str):
 
     print("Comando:", " ".join(cmd))
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        print("Erro ao rodar ffmpeg:", e)
-        sys.exit(1)
+        stderr_tail = (e.stderr or "").strip().splitlines()[-10:]
+        raise RuntimeError("Erro ffmpeg ao queimar legenda:\n" + "\n".join(stderr_tail)) from e
 
 def processar_legenda_completo(video_path, output_path, model_name="small", language="pt", gemini_key=None):
     """
@@ -171,40 +157,27 @@ def processar_legenda_completo(video_path, output_path, model_name="small", lang
     # 1. Transcrever
     segments = transcrever(video_path, model_name=model_name, language=language)
     
-    # 2. Corrigir (se solicitado)
-    # Se gemini_key for passada ou None (confiando no env), e o módulo existir
-    if corrigir_palavras_com_adk:
-        # Verifica se deve tentar (chave explicita ou env implícito)
-        should_try = False
-        if gemini_key:
-            should_try = True
-        elif os.path.exists(".env") or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
-            should_try = True
-            
-        if should_try:
-            print("\n[Auto Caption] Tentando correção com IA...")
-            all_words = []
-            for seg in segments:
-                if "words" in seg:
-                    all_words.extend(seg["words"])
-            
-            if all_words:
-                try:
-                    corrected_words = corrigir_palavras_com_adk(all_words, gemini_key)
-                    if corrected_words:
-                        # Reconstrói estrutura para o gerador
-                        segments = [{
-                            "start": corrected_words[0]["start"],
-                            "end": corrected_words[-1]["end"],
-                            "text": " ".join([w["word"] for w in corrected_words]),
-                            "words": corrected_words
-                        }]
-                except Exception as e:
-                    print(f"❌ Falha na correção IA: {e}. Usando original.")
-        else:
-            print("[Auto Caption] Pulando correção IA (sem chave ou não solicitada).")
-            if not corrigir_palavras_com_adk:
-                print("⚠️  Módulo 'adk_correction' não carregado corretamente.")
+    # 2. Corrigir com IA se o LLM estiver configurado
+    from llm import is_configured as _llm_ok
+    if gemini_key or _llm_ok():
+        print("\n[Auto Caption] Aplicando correção com IA...")
+        all_words = []
+        for seg in segments:
+            if "words" in seg:
+                all_words.extend(seg["words"])
+
+        if all_words:
+            try:
+                corrected_words = corrigir_palavras(all_words, gemini_key)
+                if corrected_words:
+                    segments = [{
+                        "start": corrected_words[0]["start"],
+                        "end": corrected_words[-1]["end"],
+                        "text": " ".join([w["word"] for w in corrected_words]),
+                        "words": corrected_words,
+                    }]
+            except Exception as e:
+                print(f"❌ Falha na correção IA: {e}. Usando original.")
 
     # 3. Gerar ASS
     gerar_ass_capcut(segments, ass_path)

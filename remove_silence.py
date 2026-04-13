@@ -4,7 +4,8 @@ import subprocess
 import re
 import sys
 import os
-import whisper
+from utils.whisper_cache import transcribe as _transcribe
+
 
 def detect_speech_intervals(input_file, model_name="tiny", language="pt", padding=0.25, min_silence=0.5, word_threshold=0.3):
     """
@@ -12,21 +13,14 @@ def detect_speech_intervals(input_file, model_name="tiny", language="pt", paddin
     Retorna lista de tuplas (start, end) para manter.
     """
     print(f"[Corte Inteligente] Analisando fala com Whisper ({model_name})...")
-    
-    try:
-        model = whisper.load_model(model_name)
-    except Exception as e:
-        print(f"Erro ao carregar Whisper para corte: {e}")
-        return []
 
-    # Transcreve com word_timestamps para precisão máxima
-    result = model.transcribe(input_file, language=language, word_timestamps=True, verbose=False)
-    
-    # Achatar todas as palavras com filtragem de confiança
+    segments = _transcribe(input_file, model_name=model_name, language=language,
+                           word_timestamps=True, verbose=False)
+
     all_words = []
     skipped_noise = 0
-    
-    for seg in result["segments"]:
+
+    for seg in segments:
         # Se a probabilidade de NÃO ter fala for alta (> 80%), ignora o segmento inteiro (alucinação)
         if seg.get("no_speech_prob", 0) > 0.8:
             continue
@@ -141,9 +135,9 @@ def remover_silencio(input_file, output_file, method="speech", threshold_db=-40,
     keep_intervals = []
     
     if method == "speech":
-        # Usa Whisper (mais inteligente, ignora ruído)
-        # Usamos modelo 'tiny' ou 'base' aqui para ser rápido, já que é só para cortar
-        keep_intervals = detect_speech_intervals(input_file, model_name="base", min_silence=min_duration)
+        # Usa o mesmo modelo escolhido pelo usuário (aproveita cache)
+        model_name = os.environ.get("WHISPER_MODEL", "small")
+        keep_intervals = detect_speech_intervals(input_file, model_name=model_name, min_silence=min_duration)
     else:
         # Usa Volume (mais rápido, mas pode pegar respiração/ruído)
         keep_intervals = detect_silence_ffmpeg(input_file, threshold_db, min_duration)
@@ -184,11 +178,12 @@ def remover_silencio(input_file, output_file, method="speech", threshold_db=-40,
     ]
     
     try:
-        subprocess.run(cmd, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         print(f"Vídeo cortado salvo em: {output_file}")
         return True
     except subprocess.CalledProcessError as e:
-        print(f"Erro ao cortar vídeo: {e}")
+        stderr_tail = (e.stderr or "").strip().splitlines()[-10:]
+        print(f"Erro ffmpeg ao cortar vídeo:\n" + "\n".join(stderr_tail))
         return False
 
 def main():
